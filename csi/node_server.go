@@ -25,12 +25,13 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	utilexec "k8s.io/utils/exec"
 
+	lhns "github.com/longhorn/go-common-libs/ns"
+	lhtypes "github.com/longhorn/go-common-libs/types"
+
 	"github.com/longhorn/longhorn-manager/csi/crypto"
 	"github.com/longhorn/longhorn-manager/engineapi"
 	"github.com/longhorn/longhorn-manager/types"
 
-	lhns "github.com/longhorn/go-common-libs/ns"
-	lhtypes "github.com/longhorn/go-common-libs/types"
 	longhornclient "github.com/longhorn/longhorn-manager/client"
 	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	lhclientset "github.com/longhorn/longhorn-manager/k8s/pkg/client/clientset/versioned"
@@ -55,13 +56,14 @@ var supportedFs = map[string]fsParameters{
 
 type NodeServer struct {
 	csi.UnimplementedNodeServer
-	apiClient   *longhornclient.RancherClient
-	nodeID      string
-	caps        []*csi.NodeServiceCapability
-	log         *logrus.Entry
-	lhNamespace string
-	kubeClient  *clientset.Clientset
-	lhClient    *lhclientset.Clientset
+	apiClient     *longhornclient.RancherClient
+	nodeID        string
+	caps          []*csi.NodeServiceCapability
+	log           *logrus.Entry
+	lhNamespace   string
+	kubeClient    clientset.Interface
+	lhClient      *lhclientset.Clientset
+	directVolumes codewireDirectVolumeOperations
 }
 
 func NewNodeServer(apiClient *longhornclient.RancherClient, nodeID string) (*NodeServer, error) {
@@ -95,10 +97,11 @@ func NewNodeServer(apiClient *longhornclient.RancherClient, nodeID string) (*Nod
 				csi.NodeServiceCapability_RPC_EXPAND_VOLUME,
 				csi.NodeServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER,
 			}),
-		log:         logrus.StandardLogger().WithField("component", "csi-node-server"),
-		lhNamespace: lhNamespace,
-		kubeClient:  kubeClient,
-		lhClient:    lhClient,
+		log:           logrus.StandardLogger().WithField("component", "csi-node-server"),
+		lhNamespace:   lhNamespace,
+		kubeClient:    kubeClient,
+		lhClient:      lhClient,
+		directVolumes: newCodewireDirectVolumeManager(),
 	}, nil
 }
 
@@ -132,8 +135,6 @@ func getV2VolumeEndpointForNode(volume *longhornclient.Volume, nodeID string) (s
 func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	log := ns.log.WithFields(logrus.Fields{"function": "NodePublishVolume"})
 
-	log.Infof("NodePublishVolume is called with req %+v", req)
-
 	targetPath := req.GetTargetPath()
 	if targetPath == "" {
 		return nil, status.Error(codes.InvalidArgument, "target path missing in request")
@@ -153,6 +154,11 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	if len(volumeID) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume id missing in request")
 	}
+	log.WithFields(logrus.Fields{"volume": volumeID, "target": targetPath, "stagingTarget": stagingTargetPath}).Info("NodePublishVolume is called")
+	direct, err := ns.codewireDirectVolumeMode(volumeID, req.GetVolumeContext())
+	if err != nil {
+		return nil, err
+	}
 
 	volume, err := ns.apiClient.Volume.ById(volumeID)
 	if err != nil {
@@ -160,6 +166,9 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	}
 	if volume == nil {
 		return nil, status.Errorf(codes.NotFound, "volume %s not found", volumeID)
+	}
+	if direct {
+		return ns.nodePublishCodewireDirectVolume(ctx, req, volume)
 	}
 
 	mounter, err := ns.getMounter(volume, volumeCapability, req.VolumeContext)
@@ -420,8 +429,6 @@ func (ns *NodeServer) nodePublishBlockVolume(volumeID, devicePath, targetPath st
 func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
 	log := ns.log.WithFields(logrus.Fields{"function": "NodeUnpublishVolume"})
 
-	log.Infof("NodeUnpublishVolume is called with req %+v", req)
-
 	targetPath := req.GetTargetPath()
 	if targetPath == "" {
 		return nil, status.Error(codes.InvalidArgument, "target path missing in request")
@@ -430,6 +437,17 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	volumeID := req.GetVolumeId()
 	if len(volumeID) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume id missing in request")
+	}
+	log.WithFields(logrus.Fields{"volume": volumeID, "target": targetPath}).Info("NodeUnpublishVolume is called")
+	direct, err := ns.directVolumes.IsManaged(volumeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to read confidential direct-volume lifecycle metadata: %v", err)
+	}
+	if direct {
+		if err := ns.directVolumes.Unpublish(ctx, volumeID, targetPath); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to unregister confidential direct volume from Kata: %v", err)
+		}
+		return &csi.NodeUnpublishVolumeResponse{}, nil
 	}
 
 	if err := unmountAndCleanupMountPoint(targetPath, mount.New("")); err != nil {
@@ -442,8 +460,6 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 
 func (ns *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	log := ns.log.WithFields(logrus.Fields{"function": "NodeStageVolume"})
-
-	log.Infof("NodeStageVolume is called with req %+v", req)
 
 	stagingTargetPath := req.GetStagingTargetPath()
 	if stagingTargetPath == "" {
@@ -459,6 +475,11 @@ func (ns *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	if len(volumeID) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume id missing in request")
 	}
+	log.WithFields(logrus.Fields{"volume": volumeID, "stagingTarget": stagingTargetPath}).Info("NodeStageVolume is called")
+	direct, err := ns.codewireDirectVolumeMode(volumeID, req.GetVolumeContext())
+	if err != nil {
+		return nil, err
+	}
 
 	volume, err := ns.apiClient.Volume.ById(volumeID)
 	if err != nil {
@@ -466,6 +487,9 @@ func (ns *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	}
 	if volume == nil {
 		return nil, status.Errorf(codes.NotFound, "volume %s not found", volumeID)
+	}
+	if direct {
+		return ns.nodeStageCodewireDirectVolume(ctx, req, volume)
 	}
 
 	mounter, err := ns.getMounter(volume, volumeCapability, req.VolumeContext)
@@ -666,6 +690,16 @@ func (ns *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstag
 	if len(volumeID) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume id missing in request")
 	}
+	direct, err := ns.directVolumes.IsManaged(volumeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to read confidential direct-volume lifecycle metadata: %v", err)
+	}
+	if direct {
+		if err := ns.directVolumes.Unstage(ctx, volumeID); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to clean up confidential direct-volume lifecycle metadata: %v", err)
+		}
+		return &csi.NodeUnstageVolumeResponse{}, nil
+	}
 
 	mounter := mount.New("")
 
@@ -718,6 +752,17 @@ func (ns *NodeServer) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVo
 	volumeID := req.GetVolumeId()
 	if len(volumeID) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume id missing in request")
+	}
+	direct, err := ns.directVolumes.IsManaged(volumeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to read confidential direct-volume lifecycle metadata: %v", err)
+	}
+	if direct {
+		response, err := ns.directVolumes.Stats(ctx, volumeID, volumePath)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to retrieve confidential direct-volume statistics: %v", err)
+		}
+		return response, nil
 	}
 
 	existVol, err := ns.apiClient.Volume.ById(volumeID)
@@ -824,8 +869,6 @@ func (ns *NodeServer) NodeExpandSharedVolume(volumeName string) error {
 func (ns *NodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandVolumeRequest) (*csi.NodeExpandVolumeResponse, error) {
 	log := ns.log.WithFields(logrus.Fields{"function": "NodeExpandVolume"})
 
-	log.Infof("NodeExpandVolume is called with req %+v", req)
-
 	if req.CapacityRange == nil {
 		return nil, status.Error(codes.InvalidArgument, "capacity range missing in request")
 	}
@@ -839,6 +882,14 @@ func (ns *NodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 	volumeID := req.GetVolumeId()
 	if len(volumeID) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume id missing in request")
+	}
+	log.WithFields(logrus.Fields{"volume": volumeID, "requestedSize": requestedSize}).Info("NodeExpandVolume is called")
+	direct, err := ns.directVolumes.IsManaged(volumeID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to read confidential direct-volume lifecycle metadata: %v", err)
+	}
+	if direct {
+		return nil, status.Error(codes.FailedPrecondition, codewireDirectVolumeRestartRequired)
 	}
 
 	volume, err := ns.apiClient.Volume.ById(volumeID)
