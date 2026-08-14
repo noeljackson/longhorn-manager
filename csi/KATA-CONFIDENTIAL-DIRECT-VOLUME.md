@@ -35,13 +35,13 @@ node plugin to find the PVC without copying its annotation into Longhorn volume
 parameters or lifecycle state.
 
 `NodeStageVolume` validates the attached raw endpoint and persists only bounded
-cleanup metadata. `NodePublishVolume` invokes the host's exact
-`/opt/kata/bin/kata-runtime` through the existing namespace helper and registers
+cleanup metadata. `NodePublishVolume` invokes the host's exact runtime-rs
+`/opt/kata/bin/kata-ctl` through the existing namespace helper and registers
 this typed mount object:
 
 ```json
 {
-  "volume-type": "block",
+  "volume-type": "directvol",
   "device": "/dev/longhorn/example-volume",
   "fstype": "confidential-storage",
   "confidential-storage": {
@@ -70,7 +70,7 @@ idempotently. Volume statistics are requested from the guest through Kata.
 ## Runtime prerequisite
 
 The CSI plugin must run on a node whose host root contains the matching
-`/opt/kata/bin/kata-runtime`. The plugin uses `nsmounter --host-root` so the
+runtime-rs `/opt/kata/bin/kata-ctl`. The plugin uses `nsmounter --host-root` so the
 runtime observes the host's direct-volume registry and shim sockets. Kata
 command diagnostics are returned with an 8 KiB bound; the contract forbids
 secret material in those commands. If this prerequisite or any validation

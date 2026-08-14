@@ -158,7 +158,7 @@ func TestKataConfidentialDirectVolumeLifecycle(t *testing.T) {
 	if request == nil || request.Profile != kataConfidentialStorageProfile || request.VolumeID != volume.Name || request.KeyURI != testKataConfidentialKeyURI {
 		t.Fatalf("unexpected confidential storage contract: %#v", request)
 	}
-	if runtime.adds[0].VolumeType != "block" || runtime.adds[0].FsType != kataConfidentialStorageFSType || runtime.adds[0].Device != volume.Controllers[0].Endpoint {
+	if runtime.adds[0].VolumeType != "directvol" || runtime.adds[0].FsType != kataConfidentialStorageFSType || runtime.adds[0].Device != volume.Controllers[0].Endpoint {
 		t.Fatalf("unexpected mount info: %#v", runtime.adds[0])
 	}
 
@@ -239,7 +239,7 @@ func TestKataConfidentialDirectVolumeUnstageCleansLingeringRegistration(t *testi
 	if err := manager.Stage("volume", "/stage", "/dev/longhorn/volume"); err != nil {
 		t.Fatal(err)
 	}
-	info := kataConfidentialDirectVolumeMountInfo{VolumeType: "block", Device: "/dev/longhorn/volume", FsType: kataConfidentialStorageFSType}
+	info := kataConfidentialDirectVolumeMountInfo{VolumeType: "directvol", Device: "/dev/longhorn/volume", FsType: kataConfidentialStorageFSType}
 	if err := manager.Publish(ctx, "volume", "/target", info); err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestKataConfidentialDirectVolumeStatsValidation(t *testing.T) {
 			if err := manager.Stage("volume", "/stage", "/dev/longhorn/volume"); err != nil {
 				t.Fatal(err)
 			}
-			info := kataConfidentialDirectVolumeMountInfo{VolumeType: "block", Device: "/dev/longhorn/volume", FsType: kataConfidentialStorageFSType}
+			info := kataConfidentialDirectVolumeMountInfo{VolumeType: "directvol", Device: "/dev/longhorn/volume", FsType: kataConfidentialStorageFSType}
 			if err := manager.Publish(context.Background(), "volume", "/target", info); err != nil {
 				t.Fatal(err)
 			}
@@ -376,7 +376,7 @@ func TestKataConfidentialDirectVolumeStatsValidation(t *testing.T) {
 	if err := manager.Stage("volume", "/stage", "/dev/longhorn/volume"); err != nil {
 		t.Fatal(err)
 	}
-	info := kataConfidentialDirectVolumeMountInfo{VolumeType: "block", Device: "/dev/longhorn/volume", FsType: kataConfidentialStorageFSType}
+	info := kataConfidentialDirectVolumeMountInfo{VolumeType: "directvol", Device: "/dev/longhorn/volume", FsType: kataConfidentialStorageFSType}
 	if err := manager.Publish(context.Background(), "volume", "/target", info); err == nil {
 		t.Fatal("expected runtime add error")
 	}
@@ -385,16 +385,16 @@ func TestKataConfidentialDirectVolumeStatsValidation(t *testing.T) {
 	}
 }
 
-func TestHostKataRuntimeUsesHostRootAndPreservesBoundedDiagnostics(t *testing.T) {
+func TestHostKataCtlUsesHostRootAndPreservesBoundedDiagnostics(t *testing.T) {
 	var command string
 	var args []string
-	runtime := &hostKataRuntime{run: func(_ context.Context, gotCommand string, gotArgs ...string) ([]byte, error) {
+	runtime := &hostKataCtl{run: func(_ context.Context, gotCommand string, gotArgs ...string) ([]byte, error) {
 		command = gotCommand
 		args = append([]string(nil), gotArgs...)
 		return []byte("structural failure marker"), errors.New("exit status 1")
 	}}
 	err := runtime.Add(context.Background(), "/target", kataConfidentialDirectVolumeMountInfo{
-		VolumeType: "block",
+		VolumeType: "directvol",
 		Device:     "/dev/longhorn/volume",
 		FsType:     kataConfidentialStorageFSType,
 		ConfidentialStorage: &kataConfidentialStorageContract{
@@ -406,10 +406,10 @@ func TestHostKataRuntimeUsesHostRootAndPreservesBoundedDiagnostics(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "structural failure marker") || !strings.Contains(err.Error(), "exit status 1") {
 		t.Fatalf("runtime error lost its diagnostic: %v", err)
 	}
-	if command != nsMounterPath || len(args) != 8 || args[0] != "--host-root" || args[1] != kataRuntimePath || args[2] != "direct-volume" || args[3] != "add" || args[6] != "--mount-info" {
+	if command != nsMounterPath || len(args) != 8 || args[0] != "--host-root" || args[1] != kataCtlPath || args[2] != "direct-volume" || args[3] != "add" || args[6] != "--mount-info" {
 		t.Fatalf("unexpected host Kata command: %q %#v", command, args)
 	}
-	wantMountInfo := `{"volume-type":"block","device":"/dev/longhorn/volume","fstype":"confidential-storage","confidential-storage":{"profile":"luks2-integrity-ext4","volume-id":"volume","key-uri":"kbs:///tenant/storage/key"}}`
+	wantMountInfo := `{"volume-type":"directvol","device":"/dev/longhorn/volume","fstype":"confidential-storage","confidential-storage":{"profile":"luks2-integrity-ext4","volume-id":"volume","key-uri":"kbs:///tenant/storage/key"}}`
 	if args[7] != wantMountInfo {
 		t.Fatalf("unexpected typed Kata mount contract: %s", args[7])
 	}
@@ -436,7 +436,7 @@ func TestNSMounterHostRootUsesTalosKubeletNamespaces(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(procDir, "123", "status"), []byte("Name:\tkubelet\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(filepath.Join("..", "package", "nsmounter"), "--host-root", kataRuntimePath, "direct-volume", "remove", "--volume-path", "/target")
+	command := exec.Command(filepath.Join("..", "package", "nsmounter"), "--host-root", kataCtlPath, "direct-volume", "remove", "--volume-path", "/target")
 	command.Env = append(os.Environ(), "PROC_DIR="+procDir, "NSENTER_BIN=/bin/echo")
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -449,7 +449,7 @@ func TestNSMounterHostRootUsesTalosKubeletNamespaces(t *testing.T) {
 		"--root=" + filepath.Join(procDir, "123", "root"),
 		"--wd=/",
 		"--",
-		kataRuntimePath,
+		kataCtlPath,
 		"direct-volume",
 		"remove",
 		"--volume-path",

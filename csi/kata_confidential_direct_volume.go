@@ -39,7 +39,7 @@ const (
 	csiPVCNamespaceKey = "csi.storage.k8s.io/pvc/namespace"
 
 	kataConfidentialDirectVolumeStateDir = "/var/lib/longhorn/kata-confidential-direct-volumes"
-	kataRuntimePath                      = "/opt/kata/bin/kata-runtime"
+	kataCtlPath                          = "/opt/kata/bin/kata-ctl"
 	nsMounterPath                        = "/usr/local/sbin/nsmounter"
 
 	kataConfidentialDirectVolumeResizeUnsupported = "Kata confidential direct volumes do not support resize"
@@ -80,12 +80,12 @@ type kataConfidentialDirectVolumeOperations interface {
 	Stats(ctx context.Context, volumeID, targetPath string) (*csi.NodeGetVolumeStatsResponse, error)
 }
 
-type hostKataRuntime struct {
+type hostKataCtl struct {
 	run func(ctx context.Context, command string, args ...string) ([]byte, error)
 }
 
-func (r *hostKataRuntime) command(ctx context.Context, args ...string) ([]byte, error) {
-	commandArgs := []string{"--host-root", kataRuntimePath, "direct-volume"}
+func (r *hostKataCtl) command(ctx context.Context, args ...string) ([]byte, error) {
+	commandArgs := []string{"--host-root", kataCtlPath, "direct-volume"}
 	commandArgs = append(commandArgs, args...)
 	run := r.run
 	if run == nil {
@@ -122,7 +122,7 @@ func boundedKataCommandOutput(output []byte) string {
 	return message
 }
 
-func (r *hostKataRuntime) Add(ctx context.Context, targetPath string, mountInfo kataConfidentialDirectVolumeMountInfo) error {
+func (r *hostKataCtl) Add(ctx context.Context, targetPath string, mountInfo kataConfidentialDirectVolumeMountInfo) error {
 	encoded, err := json.Marshal(mountInfo)
 	if err != nil {
 		return fmt.Errorf("failed to encode Kata direct-volume mount metadata: %w", err)
@@ -131,12 +131,12 @@ func (r *hostKataRuntime) Add(ctx context.Context, targetPath string, mountInfo 
 	return err
 }
 
-func (r *hostKataRuntime) Remove(ctx context.Context, targetPath string) error {
+func (r *hostKataCtl) Remove(ctx context.Context, targetPath string) error {
 	_, err := r.command(ctx, "remove", "--volume-path", targetPath)
 	return err
 }
 
-func (r *hostKataRuntime) Stats(ctx context.Context, targetPath string) ([]byte, error) {
+func (r *hostKataCtl) Stats(ctx context.Context, targetPath string) ([]byte, error) {
 	return r.command(ctx, "stats", "--volume-path", targetPath)
 }
 
@@ -149,7 +149,7 @@ type kataConfidentialDirectVolumeManager struct {
 func newKataConfidentialDirectVolumeManager() *kataConfidentialDirectVolumeManager {
 	return &kataConfidentialDirectVolumeManager{
 		stateDir: kataConfidentialDirectVolumeStateDir,
-		runtime:  &hostKataRuntime{},
+		runtime:  &hostKataCtl{},
 	}
 }
 
@@ -589,7 +589,7 @@ func (ns *NodeServer) nodePublishKataConfidentialDirectVolume(ctx context.Contex
 		return nil, status.Errorf(codes.Internal, "failed to persist confidential direct-volume lifecycle metadata: %v", err)
 	}
 	mountInfo := kataConfidentialDirectVolumeMountInfo{
-		VolumeType: "block",
+		VolumeType: "directvol",
 		Device:     devicePath,
 		FsType:     kataConfidentialStorageFSType,
 		ConfidentialStorage: &kataConfidentialStorageContract{
