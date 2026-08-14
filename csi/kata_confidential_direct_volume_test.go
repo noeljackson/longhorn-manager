@@ -28,10 +28,9 @@ import (
 )
 
 const (
-	testKataConfidentialVolumeID = "be31063a-8ec8-46d5-aa17-75cda1729370"
-	testKataConfidentialKeyURI   = "kbs:///tenant/storage/key"
-	testKataConfidentialPodUID   = "7fd5ae3d-01aa-4c7a-9d4e-a683f648851d"
-	testKataConfidentialNodeID   = "test-node"
+	testKataConfidentialManifestURI = "kbs:///tenant/storage-manifests/workspace-v1"
+	testKataConfidentialPodUID      = "7fd5ae3d-01aa-4c7a-9d4e-a683f648851d"
+	testKataConfidentialNodeID      = "test-node"
 )
 
 type fakeKataDirectVolumeRuntime struct {
@@ -88,8 +87,7 @@ func testKataConfidentialPVC() *corev1.PersistentVolumeClaim {
 			Name:      "workspace",
 			Namespace: "sandbox",
 			Annotations: map[string]string{
-				kataConfidentialStorageVolumeIDAnnotation: testKataConfidentialVolumeID,
-				kataConfidentialStorageKeyURIAnnotation:   testKataConfidentialKeyURI,
+				kataConfidentialStorageManifestURIAnnotation: testKataConfidentialManifestURI,
 			},
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
@@ -194,7 +192,7 @@ func TestKataConfidentialDirectVolumeLifecycle(t *testing.T) {
 		t.Fatalf("expected two idempotent Kata registrations, got targets %#v", runtime.addTargets)
 	}
 	request := runtime.adds[0].ConfidentialStorage
-	if request == nil || request.Profile != kataConfidentialStorageProfile || request.VolumeID != testKataConfidentialVolumeID || request.KeyURI != testKataConfidentialKeyURI {
+	if request == nil || request.ManifestURI != testKataConfidentialManifestURI || request.RequestedAccess != "readWrite" {
 		t.Fatalf("unexpected confidential storage contract: %#v", request)
 	}
 	if runtime.adds[0].VolumeType != "directvol" || runtime.adds[0].FsType != kataConfidentialStorageFSType || runtime.adds[0].Device != volume.Controllers[0].Endpoint {
@@ -228,8 +226,8 @@ func TestKataConfidentialDirectVolumeLifecycle(t *testing.T) {
 	if stateDirInfo.Mode().Perm() != 0700 {
 		t.Fatalf("unexpected lifecycle state directory permissions: %o", stateDirInfo.Mode().Perm())
 	}
-	if strings.Contains(string(stateData), testKataConfidentialKeyURI) || strings.Contains(string(stateData), "kbs://") {
-		t.Fatalf("lifecycle state contains key metadata: %s", stateData)
+	if strings.Contains(string(stateData), testKataConfidentialManifestURI) || strings.Contains(string(stateData), "kbs://") {
+		t.Fatalf("lifecycle state contains manifest metadata: %s", stateData)
 	}
 	var state kataConfidentialDirectVolumeState
 	if err := json.Unmarshal(stateData, &state); err != nil {
@@ -360,30 +358,30 @@ func TestValidateKataConfidentialDirectVolumeRejectsUnsupportedModes(t *testing.
 	}
 }
 
-func TestKataConfidentialStorageIdentityValidation(t *testing.T) {
+func TestKataConfidentialStorageManifestURIValidation(t *testing.T) {
 	ns := &NodeServer{kubeClient: fake.NewSimpleClientset(testKataConfidentialPVC())}
-	identity, err := ns.kataConfidentialStorageIdentity(context.Background(), testKataConfidentialVolumeContext())
+	manifestURI, err := ns.kataConfidentialStorageManifestURI(context.Background(), testKataConfidentialVolumeContext())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if identity.VolumeID != testKataConfidentialVolumeID || identity.KeyURI != testKataConfidentialKeyURI {
-		t.Fatalf("unexpected confidential storage identity: %#v", identity)
+	if manifestURI != testKataConfidentialManifestURI {
+		t.Fatalf("unexpected confidential storage manifest URI: %q", manifestURI)
 	}
 
-	for _, invalidVolumeID := range []string{"", "tenant//volume", "tenant/volume\nother"} {
+	for _, invalidManifestURI := range []string{"", "https://example.invalid/manifest", "kbs:///tenant/manifests/latest?revision=1", "kbs:///tenant/manifests/workspace/extra"} {
 		invalidClaim := testKataConfidentialPVC()
-		invalidClaim.Annotations[kataConfidentialStorageVolumeIDAnnotation] = invalidVolumeID
+		invalidClaim.Annotations[kataConfidentialStorageManifestURIAnnotation] = invalidManifestURI
 		ns.kubeClient = fake.NewSimpleClientset(invalidClaim)
-		if _, err := ns.kataConfidentialStorageIdentity(context.Background(), testKataConfidentialVolumeContext()); status.Code(err) != codes.InvalidArgument {
-			t.Fatalf("expected volume ID %q rejection, got %v", invalidVolumeID, err)
+		if _, err := ns.kataConfidentialStorageManifestURI(context.Background(), testKataConfidentialVolumeContext()); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("expected manifest URI %q rejection, got %v", invalidManifestURI, err)
 		}
 	}
-	for _, invalidKeyURI := range []string{"", "https://example.invalid/key", "kbs:///tenant/key\nother"} {
+	for _, legacyAnnotation := range []string{kataConfidentialStorageLegacyKeyURIAnnotation, kataConfidentialStorageLegacyVolumeIDAnnotation} {
 		invalidClaim := testKataConfidentialPVC()
-		invalidClaim.Annotations[kataConfidentialStorageKeyURIAnnotation] = invalidKeyURI
+		invalidClaim.Annotations[legacyAnnotation] = "legacy-value"
 		ns.kubeClient = fake.NewSimpleClientset(invalidClaim)
-		if _, err := ns.kataConfidentialStorageIdentity(context.Background(), testKataConfidentialVolumeContext()); status.Code(err) != codes.InvalidArgument {
-			t.Fatalf("expected key URI %q rejection, got %v", invalidKeyURI, err)
+		if _, err := ns.kataConfidentialStorageManifestURI(context.Background(), testKataConfidentialVolumeContext()); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("expected legacy annotation %q rejection, got %v", legacyAnnotation, err)
 		}
 	}
 }
@@ -560,9 +558,8 @@ func TestHostKataCtlUsesHostRootAndPreservesBoundedDiagnostics(t *testing.T) {
 		FsType:     kataConfidentialStorageFSType,
 		Metadata:   map[string]string{"fsGroup": "1000", "fsGroupChangePolicy": "OnRootMismatch"},
 		ConfidentialStorage: &kataConfidentialStorageContract{
-			Profile:  kataConfidentialStorageProfile,
-			VolumeID: "volume",
-			KeyURI:   testKataConfidentialKeyURI,
+			ManifestURI:     testKataConfidentialManifestURI,
+			RequestedAccess: "readWrite",
 		},
 	})
 	if err == nil || !strings.Contains(err.Error(), "structural failure marker") || !strings.Contains(err.Error(), "exit status 1") {
@@ -571,7 +568,7 @@ func TestHostKataCtlUsesHostRootAndPreservesBoundedDiagnostics(t *testing.T) {
 	if command != nsMounterPath || len(args) != 6 || args[0] != "--host-root" || args[1] != kataCtlPath || args[2] != "direct-volume" || args[3] != "add" || args[4] != "/target" {
 		t.Fatalf("unexpected host Kata command: %q %#v", command, args)
 	}
-	wantMountInfo := `{"volume-type":"directvol","device":"/dev/longhorn/volume","fstype":"confidential-storage","metadata":{"fsGroup":"1000","fsGroupChangePolicy":"OnRootMismatch"},"confidential-storage":{"profile":"luks2-integrity-ext4","volume-id":"volume","key-uri":"kbs:///tenant/storage/key"}}`
+	wantMountInfo := `{"volume-type":"directvol","device":"/dev/longhorn/volume","fstype":"confidential-storage","metadata":{"fsGroup":"1000","fsGroupChangePolicy":"OnRootMismatch"},"confidential-storage":{"manifest-uri":"kbs:///tenant/storage-manifests/workspace-v1","requested-access":"readWrite"}}`
 	if args[5] != wantMountInfo {
 		t.Fatalf("unexpected typed Kata mount contract: %s", args[5])
 	}

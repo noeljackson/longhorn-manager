@@ -29,13 +29,13 @@ import (
 )
 
 const (
-	kataConfidentialDirectVolumeParameter     = "kataConfidentialDirectVolume"
-	kataConfidentialStorageVolumeIDAnnotation = "io.katacontainers.storage/confidential-volume-id"
-	kataConfidentialStorageKeyURIAnnotation   = "io.katacontainers.storage/confidential-key-uri"
-	kataConfidentialStorageFSType             = "confidential-storage"
-	kataConfidentialStorageProfile            = "luks2-integrity-ext4"
-	kataConfidentialStorageVolumeIDMaxBytes   = 256
-	kataConfidentialStorageKeyURIMaxBytes     = 2048
+	kataConfidentialDirectVolumeParameter           = "kataConfidentialDirectVolume"
+	kataConfidentialStorageManifestURIAnnotation    = "io.katacontainers.storage/confidential-manifest-uri"
+	kataConfidentialStorageLegacyKeyURIAnnotation   = "io.katacontainers.storage/confidential-key-uri"
+	kataConfidentialStorageLegacyVolumeIDAnnotation = "io.katacontainers.storage/confidential-volume-id"
+	kataConfidentialStorageFSType                   = "confidential-storage"
+	kataConfidentialStorageVolumeIDMaxBytes         = 256
+	kataConfidentialStorageManifestURIMaxBytes      = 2048
 
 	csiPVCNameKey      = "csi.storage.k8s.io/pvc/name"
 	csiPVCNamespaceKey = "csi.storage.k8s.io/pvc/namespace"
@@ -61,14 +61,8 @@ type kataConfidentialDirectVolumeMountInfo struct {
 }
 
 type kataConfidentialStorageContract struct {
-	Profile  string `json:"profile"`
-	VolumeID string `json:"volume-id"`
-	KeyURI   string `json:"key-uri"`
-}
-
-type kataConfidentialStorageIdentity struct {
-	VolumeID string
-	KeyURI   string
+	ManifestURI     string `json:"manifest-uri"`
+	RequestedAccess string `json:"requested-access"`
 }
 
 type kataConfidentialDirectVolumeState struct {
@@ -595,40 +589,66 @@ func canonicalKataConfidentialVolumeID(value string) bool {
 	}) == -1
 }
 
-func canonicalKataConfidentialKeyURI(value string) bool {
-	return len(value) > len("kbs:///") &&
-		len(value) <= kataConfidentialStorageKeyURIMaxBytes &&
-		strings.HasPrefix(value, "kbs:///") &&
-		strings.IndexFunc(value, func(character rune) bool {
-			return character <= ' ' || character > '~'
-		}) == -1
+func canonicalKataConfidentialManifestURI(value string) bool {
+	if len(value) <= len("kbs:///") ||
+		len(value) > kataConfidentialStorageManifestURIMaxBytes ||
+		!strings.HasPrefix(value, "kbs:///") ||
+		strings.ContainsAny(value, "?#") {
+		return false
+	}
+
+	components := strings.Split(strings.TrimPrefix(value, "kbs:///"), "/")
+	if len(components) != 3 {
+		return false
+	}
+	for _, component := range components {
+		if component == "" || component == "." || component == ".." ||
+			strings.IndexFunc(component, func(character rune) bool {
+				return !(character >= 'a' && character <= 'z' ||
+					character >= 'A' && character <= 'Z' ||
+					character >= '0' && character <= '9' ||
+					strings.ContainsRune("-_.", character))
+			}) != -1 {
+			return false
+		}
+	}
+	return true
 }
 
-func (ns *NodeServer) kataConfidentialStorageIdentity(ctx context.Context, volumeContext map[string]string) (*kataConfidentialStorageIdentity, error) {
+func (ns *NodeServer) kataConfidentialStorageManifestURI(ctx context.Context, volumeContext map[string]string) (string, error) {
 	pvcName := volumeContext[csiPVCNameKey]
 	pvcNamespace := volumeContext[csiPVCNamespaceKey]
 	if pvcName == "" || pvcNamespace == "" {
-		return nil, status.Error(codes.InvalidArgument, "confidential direct volume is missing external-provisioner PVC metadata")
+		return "", status.Error(codes.InvalidArgument, "confidential direct volume is missing external-provisioner PVC metadata")
 	}
 	claim, err := ns.kubeClient.CoreV1().PersistentVolumeClaims(pvcNamespace).Get(ctx, pvcName, metav1.GetOptions{})
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to read confidential direct-volume PVC metadata: %v", err)
+		return "", status.Errorf(codes.Internal, "failed to read confidential direct-volume PVC metadata: %v", err)
 	}
 	if len(claim.Spec.AccessModes) != 1 || claim.Spec.AccessModes[0] != corev1.ReadWriteOncePod {
-		return nil, status.Error(codes.InvalidArgument, "confidential direct-volume PVC must use only ReadWriteOncePod")
+		return "", status.Error(codes.InvalidArgument, "confidential direct-volume PVC must use only ReadWriteOncePod")
 	}
 	if claim.Spec.VolumeMode == nil || *claim.Spec.VolumeMode != corev1.PersistentVolumeFilesystem {
-		return nil, status.Error(codes.InvalidArgument, "confidential direct-volume PVC must explicitly use Filesystem volume mode")
+		return "", status.Error(codes.InvalidArgument, "confidential direct-volume PVC must explicitly use Filesystem volume mode")
 	}
-	volumeID := claim.Annotations[kataConfidentialStorageVolumeIDAnnotation]
-	if !canonicalKataConfidentialVolumeID(volumeID) {
-		return nil, status.Error(codes.InvalidArgument, "confidential storage volume ID must be bounded canonical metadata")
+	if _, exists := claim.Annotations[kataConfidentialStorageLegacyKeyURIAnnotation]; exists {
+		return "", status.Error(codes.InvalidArgument, "confidential direct-volume PVC contains legacy key URI metadata")
 	}
-	keyURI := claim.Annotations[kataConfidentialStorageKeyURIAnnotation]
-	if !canonicalKataConfidentialKeyURI(keyURI) {
-		return nil, status.Error(codes.InvalidArgument, "confidential storage key URI must be bounded canonical kbs metadata")
+	if _, exists := claim.Annotations[kataConfidentialStorageLegacyVolumeIDAnnotation]; exists {
+		return "", status.Error(codes.InvalidArgument, "confidential direct-volume PVC contains legacy volume ID metadata")
 	}
-	return &kataConfidentialStorageIdentity{VolumeID: volumeID, KeyURI: keyURI}, nil
+	manifestURI := claim.Annotations[kataConfidentialStorageManifestURIAnnotation]
+	if !canonicalKataConfidentialManifestURI(manifestURI) {
+		return "", status.Error(codes.InvalidArgument, "confidential storage manifest URI must be a canonical immutable KBS resource URI")
+	}
+	return manifestURI, nil
+}
+
+func kataConfidentialStorageRequestedAccess(readOnly bool) (string, error) {
+	if readOnly {
+		return "", status.Error(codes.InvalidArgument, "confidential direct volumes do not support read-only publication")
+	}
+	return "readWrite", nil
 }
 
 func (ns *NodeServer) kataConfidentialPodMountMetadata(ctx context.Context, volumeContext map[string]string, targetPath string) (map[string]string, error) {
@@ -717,7 +737,7 @@ func (ns *NodeServer) nodeStageKataConfidentialDirectVolume(ctx context.Context,
 	if !cleanAbsolutePath(req.GetStagingTargetPath()) {
 		return nil, status.Error(codes.InvalidArgument, "confidential direct volume has an invalid staging target path")
 	}
-	if _, err := ns.kataConfidentialStorageIdentity(ctx, req.GetVolumeContext()); err != nil {
+	if _, err := ns.kataConfidentialStorageManifestURI(ctx, req.GetVolumeContext()); err != nil {
 		return nil, err
 	}
 	if err := ns.directVolumes.Stage(req.GetVolumeId(), req.GetStagingTargetPath(), devicePath); err != nil {
@@ -727,9 +747,6 @@ func (ns *NodeServer) nodeStageKataConfidentialDirectVolume(ctx context.Context,
 }
 
 func (ns *NodeServer) nodePublishKataConfidentialDirectVolume(ctx context.Context, req *csi.NodePublishVolumeRequest, volume *longhornclient.Volume) (*csi.NodePublishVolumeResponse, error) {
-	if req.GetReadonly() {
-		return nil, status.Error(codes.InvalidArgument, "confidential direct volumes do not support read-only publication")
-	}
 	if len(req.GetSecrets()) != 0 {
 		return nil, status.Error(codes.InvalidArgument, "confidential direct volumes reject CSI node secrets")
 	}
@@ -740,7 +757,11 @@ func (ns *NodeServer) nodePublishKataConfidentialDirectVolume(ctx context.Contex
 	if !cleanAbsolutePath(req.GetStagingTargetPath()) || !cleanAbsolutePath(req.GetTargetPath()) {
 		return nil, status.Error(codes.InvalidArgument, "confidential direct volume has an invalid publish path")
 	}
-	identity, err := ns.kataConfidentialStorageIdentity(ctx, req.GetVolumeContext())
+	manifestURI, err := ns.kataConfidentialStorageManifestURI(ctx, req.GetVolumeContext())
+	if err != nil {
+		return nil, err
+	}
+	requestedAccess, err := kataConfidentialStorageRequestedAccess(req.GetReadonly())
 	if err != nil {
 		return nil, err
 	}
@@ -760,13 +781,12 @@ func (ns *NodeServer) nodePublishKataConfidentialDirectVolume(ctx context.Contex
 		FsType:     kataConfidentialStorageFSType,
 		Metadata:   mountMetadata,
 		ConfidentialStorage: &kataConfidentialStorageContract{
-			Profile:  kataConfidentialStorageProfile,
-			VolumeID: identity.VolumeID,
-			KeyURI:   identity.KeyURI,
+			ManifestURI:     manifestURI,
+			RequestedAccess: requestedAccess,
 		},
 	}
 	if err := ns.directVolumes.Publish(ctx, req.GetVolumeId(), req.GetTargetPath(), mountInfo); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to publish confidential direct volume: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to register confidential direct volume with Kata: %v", err)
 	}
 	return &csi.NodePublishVolumeResponse{}, nil
 }
