@@ -15,8 +15,9 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 
 	"github.com/longhorn/longhorn-manager/datastore"
-	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 	"github.com/longhorn/longhorn-manager/types"
+
+	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
 const (
@@ -124,6 +125,7 @@ func NewProvisionerDeployment(namespace, serviceAccount, provisionerImage, rootD
 			"--leader-election",
 			"--leader-election-namespace=$(POD_NAMESPACE)",
 			"--default-fstype=ext4",
+			"--extra-create-metadata=true",
 			"--enable-capacity",
 			"--capacity-ownerref-level=2",
 			"--immediate-topology=false",
@@ -506,6 +508,10 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 									MountPath: "/lib/modules",
 									ReadOnly:  true,
 								},
+								{
+									Name:      "kata-confidential-direct-volume-state",
+									MountPath: kataConfidentialDirectVolumeStateDir,
+								},
 							},
 						},
 					},
@@ -575,6 +581,15 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 							VolumeSource: corev1.VolumeSource{
 								HostPath: &corev1.HostPathVolumeSource{
 									Path: "/lib/modules",
+								},
+							},
+						},
+						{
+							Name: "kata-confidential-direct-volume-state",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: kataConfidentialDirectVolumeStateDir,
+									Type: &HostPathDirectoryOrCreate,
 								},
 							},
 						},
