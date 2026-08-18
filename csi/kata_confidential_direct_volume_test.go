@@ -25,7 +25,10 @@ import (
 	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
 )
 
-const testKataConfidentialKeyURI = "kbs:///tenant/storage/key"
+const (
+	testKataConfidentialVolumeID = "be31063a-8ec8-46d5-aa17-75cda1729370"
+	testKataConfidentialKeyURI   = "kbs:///tenant/storage/key"
+)
 
 type fakeKataDirectVolumeRuntime struct {
 	adds       []kataConfidentialDirectVolumeMountInfo
@@ -81,7 +84,8 @@ func testKataConfidentialPVC() *corev1.PersistentVolumeClaim {
 			Name:      "workspace",
 			Namespace: "sandbox",
 			Annotations: map[string]string{
-				kataConfidentialStorageKeyURIAnnotation: testKataConfidentialKeyURI,
+				kataConfidentialStorageVolumeIDAnnotation: testKataConfidentialVolumeID,
+				kataConfidentialStorageKeyURIAnnotation:   testKataConfidentialKeyURI,
 			},
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
@@ -155,7 +159,7 @@ func TestKataConfidentialDirectVolumeLifecycle(t *testing.T) {
 		t.Fatalf("expected two idempotent Kata registrations, got targets %#v", runtime.addTargets)
 	}
 	request := runtime.adds[0].ConfidentialStorage
-	if request == nil || request.Profile != kataConfidentialStorageProfile || request.VolumeID != volume.Name || request.KeyURI != testKataConfidentialKeyURI {
+	if request == nil || request.Profile != kataConfidentialStorageProfile || request.VolumeID != testKataConfidentialVolumeID || request.KeyURI != testKataConfidentialKeyURI {
 		t.Fatalf("unexpected confidential storage contract: %#v", request)
 	}
 	if runtime.adds[0].VolumeType != "directvol" || runtime.adds[0].FsType != kataConfidentialStorageFSType || runtime.adds[0].Device != volume.Controllers[0].Endpoint {
@@ -305,21 +309,29 @@ func TestValidateKataConfidentialDirectVolumeRejectsUnsupportedModes(t *testing.
 	}
 }
 
-func TestKataConfidentialStorageKeyURIValidation(t *testing.T) {
+func TestKataConfidentialStorageIdentityValidation(t *testing.T) {
 	ns := &NodeServer{kubeClient: fake.NewSimpleClientset(testKataConfidentialPVC())}
-	keyURI, err := ns.kataConfidentialStorageKeyURI(context.Background(), testKataConfidentialVolumeContext())
+	identity, err := ns.kataConfidentialStorageIdentity(context.Background(), testKataConfidentialVolumeContext())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if keyURI != testKataConfidentialKeyURI {
-		t.Fatalf("unexpected key URI: %q", keyURI)
+	if identity.VolumeID != testKataConfidentialVolumeID || identity.KeyURI != testKataConfidentialKeyURI {
+		t.Fatalf("unexpected confidential storage identity: %#v", identity)
 	}
 
+	for _, invalidVolumeID := range []string{"", "tenant//volume", "tenant/volume\nother"} {
+		invalidClaim := testKataConfidentialPVC()
+		invalidClaim.Annotations[kataConfidentialStorageVolumeIDAnnotation] = invalidVolumeID
+		ns.kubeClient = fake.NewSimpleClientset(invalidClaim)
+		if _, err := ns.kataConfidentialStorageIdentity(context.Background(), testKataConfidentialVolumeContext()); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("expected volume ID %q rejection, got %v", invalidVolumeID, err)
+		}
+	}
 	for _, invalidKeyURI := range []string{"", "https://example.invalid/key", "kbs:///tenant/key\nother"} {
 		invalidClaim := testKataConfidentialPVC()
 		invalidClaim.Annotations[kataConfidentialStorageKeyURIAnnotation] = invalidKeyURI
 		ns.kubeClient = fake.NewSimpleClientset(invalidClaim)
-		if _, err := ns.kataConfidentialStorageKeyURI(context.Background(), testKataConfidentialVolumeContext()); status.Code(err) != codes.InvalidArgument {
+		if _, err := ns.kataConfidentialStorageIdentity(context.Background(), testKataConfidentialVolumeContext()); status.Code(err) != codes.InvalidArgument {
 			t.Fatalf("expected key URI %q rejection, got %v", invalidKeyURI, err)
 		}
 	}
