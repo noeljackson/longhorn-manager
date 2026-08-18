@@ -24,11 +24,18 @@ this profile, so its StorageClass must keep expansion disabled.
 The marked volume must be a filesystem-mode, `ReadWriteOncePod`, ext4 PVC with
 one Longhorn V1 replica, the block-device frontend, and no Longhorn host
 encryption or migration. The PVC must explicitly use `volumeMode: Filesystem`
-and contain the non-secret KBS resource URI in this annotation:
+and contain the stable logical volume ID and non-secret KBS resource URI in
+these annotations:
 
 ```text
+io.katacontainers.storage/confidential-volume-id
 io.katacontainers.storage/confidential-key-uri
 ```
+
+The logical ID is owner-assigned before dynamic provisioning. It is the
+identity authorized by measured Init-Data and authenticated in the guest's
+persistent header; Longhorn's generated backend volume name remains untrusted
+transport identity.
 
 The external provisioner runs with `--extra-create-metadata=true`, allowing the
 node plugin to find the PVC without copying its annotation into Longhorn volume
@@ -46,7 +53,7 @@ this typed mount object:
   "fstype": "confidential-storage",
   "confidential-storage": {
     "profile": "luks2-integrity-ext4",
-    "volume-id": "example-volume",
+    "volume-id": "be31063a-8ec8-46d5-aa17-75cda1729370",
     "key-uri": "kbs:///tenant/storage/key"
   }
 }
