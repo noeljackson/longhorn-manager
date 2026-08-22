@@ -1,0 +1,5 @@
+# libmount checks the container view of SELinux before forwarding context=
+# mount options to the kernel. CSI node plugins see the host selinuxfs at
+# /sys/fs/selinux, so keep userspace detection enabled on enforcing hosts.
+SELINUX=enforcing
+SELINUXTYPE=targeted

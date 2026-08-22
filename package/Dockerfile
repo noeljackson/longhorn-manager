@@ -42,6 +42,11 @@ RUN zypper -n install \
     smartmontools \
     && zypper clean --all
 
+# The CSI node plugin receives the host /sys mount. Without a userspace
+# SELinux configuration, libmount reports SELinux disabled and silently drops
+# context= mount options before the mount syscall.
+COPY --chmod=0644 package/selinux-config /etc/selinux/config
+
 COPY --from=builder /app/bin/longhorn-manager-${ARCH} /usr/local/sbin/longhorn-manager
 
 COPY --from=builder /app/package/launch-manager /app/package/nsmounter /usr/local/sbin/
