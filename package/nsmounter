@@ -14,6 +14,7 @@ get_os_distro() {
 }
 
 target_pid=1
+host_root_pid=1
 
 host_root=false
 if [ "${1:-}" = "--host-root" ]; then
@@ -59,8 +60,12 @@ ns_net="$ns_dir/net"
 ns_uts="$ns_dir/uts"
 
 if [ "$host_root" = true ]; then
+  # Talos system extensions are overlaid into PID 1's root after kubelet's
+  # process root is established. Keep kubelet's namespaces for mount
+  # propagation and runtime sockets, but resolve the host executable through
+  # the canonical host root. On ordinary Linux both roots are identical.
   "$NSENTER_BIN" --mount="$ns_mnt" --net="$ns_net" --uts="$ns_uts" \
-    --root="$PROC_DIR/$target_pid/root" --wd=/ -- "$@"
+    --root="$PROC_DIR/$host_root_pid/root" --wd=/ -- "$@"
 else
   "$NSENTER_BIN" --mount="$ns_mnt" --net="$ns_net" --uts="$ns_uts" -- "$@"
 fi

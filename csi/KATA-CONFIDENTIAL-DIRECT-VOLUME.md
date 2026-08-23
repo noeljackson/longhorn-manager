@@ -82,7 +82,9 @@ deployer) selects its absolute, clean host path and defaults to the standard
 Kata installation at `/opt/kata/bin/kata-ctl`. Talos extensions use
 `/usr/local/bin/kata-ctl`, which must be configured explicitly. The plugin uses
 `nsmounter --host-root` so the runtime observes the host's direct-volume
-registry and shim sockets. Kata command diagnostics are returned with an 8 KiB
-bound; the contract forbids secret material in those commands. If this
+registry and shim sockets. On Talos it retains kubelet's mount/network/UTS
+namespaces for propagation while resolving the extension executable through
+PID 1's canonical host root. Kata command diagnostics are returned with an 8
+KiB bound; the contract forbids secret material in those commands. If this
 prerequisite or any validation fails, the operation fails closed and never
 falls back to the host-mount path.
