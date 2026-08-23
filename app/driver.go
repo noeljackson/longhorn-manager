@@ -31,6 +31,8 @@ const (
 	FlagManagerURL = "manager-url"
 
 	FlagKubeletRootDir = "kubelet-root-dir"
+	FlagKataCtlPath    = "kata-ctl-path"
+	EnvKataCtlPath     = "KATA_CTL_PATH"
 
 	FlagCSIAttacherImage            = "csi-attacher-image"
 	FlagCSIProvisionerImage         = "csi-provisioner-image"
@@ -74,6 +76,12 @@ func DeployDriverCmd() cli.Command {
 				Name:   FlagKubeletRootDir,
 				Usage:  "Specify the root directory of kubelet for csi components (optional)",
 				EnvVar: EnvKubeletRootDir,
+			},
+			cli.StringFlag{
+				Name:   FlagKataCtlPath,
+				Usage:  "Specify the absolute host path to the Kata control binary",
+				EnvVar: EnvKataCtlPath,
+				Value:  csi.DefaultKataCtlPath,
 			},
 			cli.StringFlag{
 				Name:   FlagCSIAttacherImage,
@@ -167,6 +175,9 @@ func validateFlags(c *cli.Context) error {
 			return fmt.Errorf("%q cannot be empty", flag)
 		}
 	}
+	if err := csi.ValidateKataCtlPath(c.String(FlagKataCtlPath)); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -234,6 +245,7 @@ func deployCSIDriver(kubeClient *clientset.Clientset, lhClient *lhclientset.Clie
 	namespace := os.Getenv(types.EnvPodNamespace)
 	serviceAccountName := os.Getenv(types.EnvServiceAccount)
 	rootDir := c.String(FlagKubeletRootDir)
+	kataCtlPath := c.String(FlagKataCtlPath)
 
 	tolerationSetting, err := lhClient.LonghornV1beta2().Settings(namespace).Get(context.TODO(), string(types.SettingNameTaintToleration), metav1.GetOptions{})
 	if err != nil {
@@ -353,7 +365,7 @@ func deployCSIDriver(kubeClient *clientset.Clientset, lhClient *lhclientset.Clie
 		return err
 	}
 
-	pluginDeployment := csi.NewPluginDeployment(namespace, serviceAccountName, csiNodeDriverRegistrarImage, csiLivenessProbeImage, managerImage, managerURL, rootDir, tolerations, string(tolerationsByte), priorityClass, registrySecret, imagePullPolicy, nodeSelector, endpointNetworkForRWXVolumeSetting, resourceLimits)
+	pluginDeployment := csi.NewPluginDeployment(namespace, serviceAccountName, csiNodeDriverRegistrarImage, csiLivenessProbeImage, managerImage, managerURL, rootDir, kataCtlPath, tolerations, string(tolerationsByte), priorityClass, registrySecret, imagePullPolicy, nodeSelector, endpointNetworkForRWXVolumeSetting, resourceLimits)
 	if err := pluginDeployment.Deploy(kubeClient); err != nil {
 		return err
 	}

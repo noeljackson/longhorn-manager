@@ -295,7 +295,7 @@ type PluginDeployment struct {
 	daemonSet *appsv1.DaemonSet
 }
 
-func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, livenessProbeImage, managerImage, managerURL, rootDir string,
+func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, livenessProbeImage, managerImage, managerURL, rootDir, kataCtlPath string,
 	tolerations []corev1.Toleration, tolerationsString, priorityClass, registrySecret string, imagePullPolicy corev1.PullPolicy, nodeSelector map[string]string,
 	endpointNetworkForRWXVolumeSetting *longhorn.Setting, resourceLimits *types.ComponentResourceLimits) *PluginDeployment {
 
@@ -450,6 +450,7 @@ func NewPluginDeployment(namespace, serviceAccount, nodeDriverRegistrarImage, li
 								"--endpoint=$(CSI_ENDPOINT)",
 								fmt.Sprintf("--drivername=%s", types.LonghornDriverName),
 								"--manager-url=" + managerURL,
+								"--kata-ctl-path=" + kataCtlPath,
 							},
 							Env: appendTimezoneEnv([]corev1.EnvVar{
 								{

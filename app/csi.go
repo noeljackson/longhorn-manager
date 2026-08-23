@@ -31,6 +31,12 @@ func CSICommand() cli.Command {
 				Value: "",
 				Usage: "Longhorn manager API URL",
 			},
+			cli.StringFlag{
+				Name:   FlagKataCtlPath,
+				Value:  csi.DefaultKataCtlPath,
+				Usage:  "Absolute host path to the Kata control binary",
+				EnvVar: EnvKataCtlPath,
+			},
 		},
 		Action: func(c *cli.Context) {
 			if err := runCSI(c); err != nil {
@@ -47,5 +53,6 @@ func runCSI(c *cli.Context) error {
 		c.String("nodeid"),
 		c.String("endpoint"),
 		identityVersion,
-		c.String("manager-url"))
+		c.String("manager-url"),
+		c.String(FlagKataCtlPath))
 }

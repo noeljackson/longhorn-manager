@@ -66,7 +66,10 @@ type NodeServer struct {
 	directVolumes kataConfidentialDirectVolumeOperations
 }
 
-func NewNodeServer(apiClient *longhornclient.RancherClient, nodeID string) (*NodeServer, error) {
+func NewNodeServer(apiClient *longhornclient.RancherClient, nodeID, kataCtlPath string) (*NodeServer, error) {
+	if err := ValidateKataCtlPath(kataCtlPath); err != nil {
+		return nil, err
+	}
 	lhNamespace := os.Getenv(types.EnvPodNamespace)
 	if lhNamespace == "" {
 		return nil, fmt.Errorf("failed to detect pod namespace, environment variable %v is missing", types.EnvPodNamespace)
@@ -101,7 +104,7 @@ func NewNodeServer(apiClient *longhornclient.RancherClient, nodeID string) (*Nod
 		lhNamespace:   lhNamespace,
 		kubeClient:    kubeClient,
 		lhClient:      lhClient,
-		directVolumes: newKataConfidentialDirectVolumeManager(),
+		directVolumes: newKataConfidentialDirectVolumeManager(kataCtlPath),
 	}, nil
 }
 

@@ -21,7 +21,7 @@ func TestKataConfidentialDirectVolumeDeploymentInputs(t *testing.T) {
 
 	plugin := NewPluginDeployment(
 		"longhorn-system", "longhorn-service-account", "registrar:exact", "liveness:exact", "manager:exact",
-		"http://longhorn-backend:9500/v1", "/var/lib/kubelet", nil, "", "", "", corev1.PullIfNotPresent,
+		"http://longhorn-backend:9500/v1", "/var/lib/kubelet", "/usr/local/bin/kata-ctl", nil, "", "", "", corev1.PullIfNotPresent,
 		nil, &longhorn.Setting{Value: string(types.CniNetworkNone)}, nil,
 	)
 	var pluginContainer *corev1.Container
@@ -34,6 +34,9 @@ func TestKataConfidentialDirectVolumeDeploymentInputs(t *testing.T) {
 	}
 	if pluginContainer == nil {
 		t.Fatal("CSI plugin container missing")
+	}
+	if !containsString(pluginContainer.Args, "--kata-ctl-path=/usr/local/bin/kata-ctl") {
+		t.Fatal("CSI plugin is missing the configured host Kata control path")
 	}
 	foundMount := false
 	for _, volumeMount := range pluginContainer.VolumeMounts {

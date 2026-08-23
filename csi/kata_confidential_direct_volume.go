@@ -40,7 +40,8 @@ const (
 	csiPVCNamespaceKey = "csi.storage.k8s.io/pvc/namespace"
 
 	kataConfidentialDirectVolumeStateDir = "/var/lib/longhorn/kata-confidential-direct-volumes"
-	kataCtlPath                          = "/opt/kata/bin/kata-ctl"
+	DefaultKataCtlPath                   = "/opt/kata/bin/kata-ctl"
+	kataCtlPath                          = DefaultKataCtlPath
 	nsMounterPath                        = "/usr/local/sbin/nsmounter"
 
 	kataConfidentialDirectVolumeResizeUnsupported = "Kata confidential direct volumes do not support resize"
@@ -87,11 +88,16 @@ type kataConfidentialDirectVolumeOperations interface {
 }
 
 type hostKataCtl struct {
-	run func(ctx context.Context, command string, args ...string) ([]byte, error)
+	path string
+	run  func(ctx context.Context, command string, args ...string) ([]byte, error)
 }
 
 func (r *hostKataCtl) command(ctx context.Context, args ...string) ([]byte, error) {
-	commandArgs := []string{"--host-root", kataCtlPath, "direct-volume"}
+	path := r.path
+	if path == "" {
+		path = DefaultKataCtlPath
+	}
+	commandArgs := []string{"--host-root", path, "direct-volume"}
 	commandArgs = append(commandArgs, args...)
 	run := r.run
 	if run == nil {
@@ -152,11 +158,19 @@ type kataConfidentialDirectVolumeManager struct {
 	runtime  kataDirectVolumeRuntime
 }
 
-func newKataConfidentialDirectVolumeManager() *kataConfidentialDirectVolumeManager {
+func newKataConfidentialDirectVolumeManager(kataCtlPath string) *kataConfidentialDirectVolumeManager {
 	return &kataConfidentialDirectVolumeManager{
 		stateDir: kataConfidentialDirectVolumeStateDir,
-		runtime:  &hostKataCtl{},
+		runtime:  &hostKataCtl{path: kataCtlPath},
 	}
+}
+
+func ValidateKataCtlPath(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
+		return fmt.Errorf("Kata control path must be an absolute, clean executable path")
+	}
+
+	return nil
 }
 
 func (m *kataConfidentialDirectVolumeManager) statePath(volumeID string) string {
