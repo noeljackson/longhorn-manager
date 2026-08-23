@@ -24,7 +24,7 @@ func GetCSIManager() *Manager {
 	return &Manager{}
 }
 
-func (m *Manager) Run(driverName, nodeID, endpoint, identityVersion, managerURL string) error {
+func (m *Manager) Run(driverName, nodeID, endpoint, identityVersion, managerURL, kataCtlPath string) error {
 	logrus.Infof("CSI Driver: %v version: %v, manager URL %v", driverName, identityVersion, managerURL)
 
 	// Longhorn API Client
@@ -36,7 +36,7 @@ func (m *Manager) Run(driverName, nodeID, endpoint, identityVersion, managerURL 
 
 	// Create GRPC servers
 	m.ids = NewIdentityServer(driverName, identityVersion)
-	m.ns, err = NewNodeServer(apiClient, nodeID)
+	m.ns, err = NewNodeServer(apiClient, nodeID, kataCtlPath)
 	if err != nil {
 		return errors.Wrap(err, "Failed to create CSI node server ")
 	}

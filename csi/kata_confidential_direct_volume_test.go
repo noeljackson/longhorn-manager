@@ -427,6 +427,36 @@ func TestHostKataCtlUsesHostRootAndPreservesBoundedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestHostKataCtlUsesConfiguredPath(t *testing.T) {
+	var args []string
+	runtime := &hostKataCtl{
+		path: "/usr/local/bin/kata-ctl",
+		run: func(_ context.Context, _ string, gotArgs ...string) ([]byte, error) {
+			args = append([]string(nil), gotArgs...)
+			return nil, nil
+		},
+	}
+	if err := runtime.Remove(context.Background(), "/target"); err != nil {
+		t.Fatal(err)
+	}
+	if len(args) < 2 || args[0] != "--host-root" || args[1] != "/usr/local/bin/kata-ctl" {
+		t.Fatalf("configured Kata control path was not used: %#v", args)
+	}
+}
+
+func TestValidateKataCtlPath(t *testing.T) {
+	for _, path := range []string{DefaultKataCtlPath, "/usr/local/bin/kata-ctl"} {
+		if err := ValidateKataCtlPath(path); err != nil {
+			t.Fatalf("expected %q to be valid: %v", path, err)
+		}
+	}
+	for _, path := range []string{"", "kata-ctl", "/", "/usr/local/../bin/kata-ctl"} {
+		if err := ValidateKataCtlPath(path); err == nil {
+			t.Fatalf("expected %q to be rejected", path)
+		}
+	}
+}
+
 func TestBoundedKataCommandOutput(t *testing.T) {
 	message := boundedKataCommandOutput(append(bytes.Repeat([]byte("a"), 9000), 0))
 	if !strings.HasSuffix(message, " [truncated]") || len(message) > 8300 {

@@ -43,8 +43,8 @@ parameters or lifecycle state.
 
 `NodeStageVolume` validates the attached raw endpoint and persists only bounded
 cleanup metadata. `NodePublishVolume` invokes the host's exact runtime-rs
-`/opt/kata/bin/kata-ctl` through the existing namespace helper and registers
-this typed mount object:
+`kata-ctl` through the existing namespace helper and registers this typed mount
+object:
 
 ```json
 {
@@ -77,8 +77,12 @@ idempotently. Volume statistics are requested from the guest through Kata.
 ## Runtime prerequisite
 
 The CSI plugin must run on a node whose host root contains the matching
-runtime-rs `/opt/kata/bin/kata-ctl`. The plugin uses `nsmounter --host-root` so the
-runtime observes the host's direct-volume registry and shim sockets. Kata
-command diagnostics are returned with an 8 KiB bound; the contract forbids
-secret material in those commands. If this prerequisite or any validation
-fails, the operation fails closed and never falls back to the host-mount path.
+runtime-rs `kata-ctl`. `--kata-ctl-path` (or `KATA_CTL_PATH` on the driver
+deployer) selects its absolute, clean host path and defaults to the standard
+Kata installation at `/opt/kata/bin/kata-ctl`. Talos extensions use
+`/usr/local/bin/kata-ctl`, which must be configured explicitly. The plugin uses
+`nsmounter --host-root` so the runtime observes the host's direct-volume
+registry and shim sockets. Kata command diagnostics are returned with an 8 KiB
+bound; the contract forbids secret material in those commands. If this
+prerequisite or any validation fails, the operation fails closed and never
+falls back to the host-mount path.
