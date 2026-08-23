@@ -467,7 +467,7 @@ func TestBoundedKataCommandOutput(t *testing.T) {
 	}
 }
 
-func TestNSMounterHostRootUsesTalosKubeletNamespaces(t *testing.T) {
+func TestNSMounterHostRootUsesTalosKubeletNamespacesAndPID1Root(t *testing.T) {
 	procDir := filepath.Join(t.TempDir(), "proc")
 	if err := os.MkdirAll(filepath.Join(procDir, "123", "ns"), 0755); err != nil {
 		t.Fatal(err)
@@ -488,7 +488,7 @@ func TestNSMounterHostRootUsesTalosKubeletNamespaces(t *testing.T) {
 		"--mount=" + filepath.Join(procDir, "123", "ns", "mnt"),
 		"--net=" + filepath.Join(procDir, "123", "ns", "net"),
 		"--uts=" + filepath.Join(procDir, "123", "ns", "uts"),
-		"--root=" + filepath.Join(procDir, "123", "root"),
+		"--root=" + filepath.Join(procDir, "1", "root"),
 		"--wd=/",
 		"--",
 		kataCtlPath,
