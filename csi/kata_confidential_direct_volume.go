@@ -139,17 +139,17 @@ func (r *hostKataCtl) Add(ctx context.Context, targetPath string, mountInfo kata
 	if err != nil {
 		return fmt.Errorf("failed to encode Kata direct-volume mount metadata: %w", err)
 	}
-	_, err = r.command(ctx, "add", "--volume-path", targetPath, "--mount-info", string(encoded))
+	_, err = r.command(ctx, "add", targetPath, string(encoded))
 	return err
 }
 
 func (r *hostKataCtl) Remove(ctx context.Context, targetPath string) error {
-	_, err := r.command(ctx, "remove", "--volume-path", targetPath)
+	_, err := r.command(ctx, "remove", targetPath)
 	return err
 }
 
 func (r *hostKataCtl) Stats(ctx context.Context, targetPath string) ([]byte, error) {
-	return r.command(ctx, "stats", "--volume-path", targetPath)
+	return r.command(ctx, "stats", targetPath)
 }
 
 type kataConfidentialDirectVolumeManager struct {
