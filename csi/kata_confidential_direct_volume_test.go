@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -418,12 +419,12 @@ func TestHostKataCtlUsesHostRootAndPreservesBoundedDiagnostics(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "structural failure marker") || !strings.Contains(err.Error(), "exit status 1") {
 		t.Fatalf("runtime error lost its diagnostic: %v", err)
 	}
-	if command != nsMounterPath || len(args) != 8 || args[0] != "--host-root" || args[1] != kataCtlPath || args[2] != "direct-volume" || args[3] != "add" || args[6] != "--mount-info" {
+	if command != nsMounterPath || len(args) != 6 || args[0] != "--host-root" || args[1] != kataCtlPath || args[2] != "direct-volume" || args[3] != "add" || args[4] != "/target" {
 		t.Fatalf("unexpected host Kata command: %q %#v", command, args)
 	}
 	wantMountInfo := `{"volume-type":"directvol","device":"/dev/longhorn/volume","fstype":"confidential-storage","confidential-storage":{"profile":"luks2-integrity-ext4","volume-id":"volume","key-uri":"kbs:///tenant/storage/key"}}`
-	if args[7] != wantMountInfo {
-		t.Fatalf("unexpected typed Kata mount contract: %s", args[7])
+	if args[5] != wantMountInfo {
+		t.Fatalf("unexpected typed Kata mount contract: %s", args[5])
 	}
 }
 
@@ -439,8 +440,17 @@ func TestHostKataCtlUsesConfiguredPath(t *testing.T) {
 	if err := runtime.Remove(context.Background(), "/target"); err != nil {
 		t.Fatal(err)
 	}
-	if len(args) < 2 || args[0] != "--host-root" || args[1] != "/usr/local/bin/kata-ctl" {
+	want := []string{"--host-root", "/usr/local/bin/kata-ctl", "direct-volume", "remove", "/target"}
+	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("configured Kata control path was not used: %#v", args)
+	}
+	args = nil
+	if _, err := runtime.Stats(context.Background(), "/target"); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"--host-root", "/usr/local/bin/kata-ctl", "direct-volume", "stats", "/target"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("Kata stats did not use the positional runtime-rs contract: %#v", args)
 	}
 }
 
@@ -478,7 +488,7 @@ func TestNSMounterHostRootUsesTalosKubeletNamespacesAndPID1Root(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(procDir, "123", "status"), []byte("Name:\tkubelet\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(filepath.Join("..", "package", "nsmounter"), "--host-root", kataCtlPath, "direct-volume", "remove", "--volume-path", "/target")
+	command := exec.Command(filepath.Join("..", "package", "nsmounter"), "--host-root", kataCtlPath, "direct-volume", "remove", "/target")
 	command.Env = append(os.Environ(), "PROC_DIR="+procDir, "NSENTER_BIN=/bin/echo")
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -494,7 +504,6 @@ func TestNSMounterHostRootUsesTalosKubeletNamespacesAndPID1Root(t *testing.T) {
 		kataCtlPath,
 		"direct-volume",
 		"remove",
-		"--volume-path",
 		"/target",
 	}, " ") + "\n"
 	if string(output) != want {
