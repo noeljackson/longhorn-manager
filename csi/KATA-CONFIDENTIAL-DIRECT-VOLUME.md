@@ -51,6 +51,10 @@ object:
   "volume-type": "directvol",
   "device": "/dev/longhorn/example-volume",
   "fstype": "confidential-storage",
+  "metadata": {
+    "fsGroup": "1000",
+    "fsGroupChangePolicy": "OnRootMismatch"
+  },
   "confidential-storage": {
     "profile": "luks2-integrity-ext4",
     "volume-id": "be31063a-8ec8-46d5-aa17-75cda1729370",
@@ -58,6 +62,20 @@ object:
   }
 }
 ```
+
+The CSI driver requires kubelet's `podInfoOnMount` metadata, verifies the exact
+Pod UID, node assignment, PVC reference, and target path, and copies only the
+Pod's numeric `fsGroup` and optional standard `fsGroupChangePolicy` into the
+typed request. Kata passes that policy to the guest agent, which applies group
+ownership to the activated guest filesystem. No Pod identity is persisted in
+Longhorn lifecycle state.
+
+`NodePublishVolume` also creates the empty CSI target directory expected by
+kubelet's host-side `fsGroup` pass. The directory is only a placeholder: no
+device or plaintext filesystem is mounted there. It must remain an empty,
+non-symlink directory and is removed after the Kata registration is removed.
+This preserves normal kubelet semantics while the encrypted filesystem and its
+contents exist only inside the guest.
 
 The outer fstype is a fail-closed protocol discriminator. Kata validates the
 typed object, matches its complete tuple to measured init-data, and asks CDH to
@@ -70,8 +88,9 @@ command output, or logs. The volume ID and KBS URI are bounded non-secret
 identifiers. Kata and the attested guest own LUKS2 initialization or reopen and
 the ext4 mount.
 
-Unpublish and unstage remove Kata registration and lifecycle state
-idempotently. Volume statistics are requested from the guest through Kata.
+Unpublish and unstage remove Kata registration, the empty target placeholder,
+and lifecycle state idempotently. Volume statistics are requested from the
+guest through Kata.
 `NodeExpandVolume` returns a stable `FailedPrecondition` without mutation.
 
 ## Runtime prerequisite

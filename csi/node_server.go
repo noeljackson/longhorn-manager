@@ -56,14 +56,15 @@ var supportedFs = map[string]fsParameters{
 
 type NodeServer struct {
 	csi.UnimplementedNodeServer
-	apiClient     *longhornclient.RancherClient
-	nodeID        string
-	caps          []*csi.NodeServiceCapability
-	log           *logrus.Entry
-	lhNamespace   string
-	kubeClient    clientset.Interface
-	lhClient      *lhclientset.Clientset
-	directVolumes kataConfidentialDirectVolumeOperations
+	apiClient       *longhornclient.RancherClient
+	nodeID          string
+	caps            []*csi.NodeServiceCapability
+	log             *logrus.Entry
+	lhNamespace     string
+	kubeClient      clientset.Interface
+	lhClient        *lhclientset.Clientset
+	directVolumes   kataConfidentialDirectVolumeOperations
+	kubeletPodsRoot string
 }
 
 func NewNodeServer(apiClient *longhornclient.RancherClient, nodeID, kataCtlPath string) (*NodeServer, error) {
@@ -100,11 +101,12 @@ func NewNodeServer(apiClient *longhornclient.RancherClient, nodeID, kataCtlPath 
 				csi.NodeServiceCapability_RPC_EXPAND_VOLUME,
 				csi.NodeServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER,
 			}),
-		log:           logrus.StandardLogger().WithField("component", "csi-node-server"),
-		lhNamespace:   lhNamespace,
-		kubeClient:    kubeClient,
-		lhClient:      lhClient,
-		directVolumes: newKataConfidentialDirectVolumeManager(kataCtlPath),
+		log:             logrus.StandardLogger().WithField("component", "csi-node-server"),
+		lhNamespace:     lhNamespace,
+		kubeClient:      kubeClient,
+		lhClient:        lhClient,
+		directVolumes:   newKataConfidentialDirectVolumeManager(kataCtlPath),
+		kubeletPodsRoot: kataConfidentialKubeletPodsRoot,
 	}, nil
 }
 
