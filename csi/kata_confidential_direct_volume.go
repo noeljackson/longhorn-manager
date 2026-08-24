@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -38,8 +39,12 @@ const (
 
 	csiPVCNameKey      = "csi.storage.k8s.io/pvc/name"
 	csiPVCNamespaceKey = "csi.storage.k8s.io/pvc/namespace"
+	csiPodNameKey      = "csi.storage.k8s.io/pod.name"
+	csiPodNamespaceKey = "csi.storage.k8s.io/pod.namespace"
+	csiPodUIDKey       = "csi.storage.k8s.io/pod.uid"
 
 	kataConfidentialDirectVolumeStateDir = "/var/lib/longhorn/kata-confidential-direct-volumes"
+	kataConfidentialKubeletPodsRoot      = "/var/lib/kubelet/pods"
 	DefaultKataCtlPath                   = "/opt/kata/bin/kata-ctl"
 	kataCtlPath                          = DefaultKataCtlPath
 	nsMounterPath                        = "/usr/local/sbin/nsmounter"
@@ -51,6 +56,7 @@ type kataConfidentialDirectVolumeMountInfo struct {
 	VolumeType          string                           `json:"volume-type"`
 	Device              string                           `json:"device"`
 	FsType              string                           `json:"fstype"`
+	Metadata            map[string]string                `json:"metadata,omitempty"`
 	ConfidentialStorage *kataConfidentialStorageContract `json:"confidential-storage,omitempty"`
 }
 
@@ -313,6 +319,9 @@ func (m *kataConfidentialDirectVolumeManager) Publish(ctx context.Context, volum
 			return err
 		}
 	}
+	if err := ensureKataConfidentialDirectVolumeTarget(targetPath); err != nil {
+		return err
+	}
 	return m.runtime.Add(ctx, targetPath, mountInfo)
 }
 
@@ -340,6 +349,9 @@ func (m *kataConfidentialDirectVolumeManager) Unpublish(ctx context.Context, vol
 	if err := m.runtime.Remove(ctx, targetPath); err != nil {
 		return err
 	}
+	if err := removeKataConfidentialDirectVolumeTarget(targetPath); err != nil {
+		return err
+	}
 	paths := state.PublishedPaths[:0]
 	for _, publishedPath := range state.PublishedPaths {
 		if publishedPath != targetPath {
@@ -365,9 +377,60 @@ func (m *kataConfidentialDirectVolumeManager) Unstage(ctx context.Context, volum
 		if err := m.runtime.Remove(ctx, targetPath); err != nil {
 			return err
 		}
+		if err := removeKataConfidentialDirectVolumeTarget(targetPath); err != nil {
+			return err
+		}
 	}
 	if err := os.Remove(m.statePath(volumeID)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove confidential direct-volume lifecycle metadata: %w", err)
+	}
+	return nil
+}
+
+func ensureKataConfidentialDirectVolumeTarget(targetPath string) error {
+	info, err := os.Lstat(targetPath)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(targetPath, 0750); err != nil {
+			return fmt.Errorf("failed to create confidential direct-volume target: %w", err)
+		}
+		info, err = os.Lstat(targetPath)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect confidential direct-volume target: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("confidential direct-volume target is not a directory")
+	}
+	entries, err := os.ReadDir(targetPath)
+	if err != nil {
+		return fmt.Errorf("failed to inspect confidential direct-volume target contents: %w", err)
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("confidential direct-volume target is not empty")
+	}
+	return nil
+}
+
+func removeKataConfidentialDirectVolumeTarget(targetPath string) error {
+	info, err := os.Lstat(targetPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to inspect confidential direct-volume target during cleanup: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to remove non-directory confidential direct-volume target")
+	}
+	entries, err := os.ReadDir(targetPath)
+	if err != nil {
+		return fmt.Errorf("failed to inspect confidential direct-volume target during cleanup: %w", err)
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("refusing to remove non-empty confidential direct-volume target")
+	}
+	if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove confidential direct-volume target: %w", err)
 	}
 	return nil
 }
@@ -568,6 +631,81 @@ func (ns *NodeServer) kataConfidentialStorageIdentity(ctx context.Context, volum
 	return &kataConfidentialStorageIdentity{VolumeID: volumeID, KeyURI: keyURI}, nil
 }
 
+func (ns *NodeServer) kataConfidentialPodMountMetadata(ctx context.Context, volumeContext map[string]string, targetPath string) (map[string]string, error) {
+	podName := volumeContext[csiPodNameKey]
+	podNamespace := volumeContext[csiPodNamespaceKey]
+	podUID := volumeContext[csiPodUIDKey]
+	if podName == "" || podNamespace == "" || podUID == "" {
+		return nil, status.Error(codes.InvalidArgument, "confidential direct volume is missing kubelet Pod metadata")
+	}
+	if podNamespace != volumeContext[csiPVCNamespaceKey] {
+		return nil, status.Error(codes.InvalidArgument, "confidential direct-volume Pod and PVC namespaces differ")
+	}
+	pod, err := ns.kubeClient.CoreV1().Pods(podNamespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to read confidential direct-volume Pod metadata: %v", err)
+	}
+	if string(pod.UID) != podUID {
+		return nil, status.Error(codes.FailedPrecondition, "confidential direct-volume Pod UID changed")
+	}
+	if pod.Spec.NodeName == "" || pod.Spec.NodeName != ns.nodeID {
+		return nil, status.Error(codes.FailedPrecondition, "confidential direct-volume Pod is not assigned to this node")
+	}
+	claimName := volumeContext[csiPVCNameKey]
+	usesClaim := false
+	for _, volume := range pod.Spec.Volumes {
+		if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claimName {
+			usesClaim = true
+			break
+		}
+	}
+	if !usesClaim {
+		return nil, status.Error(codes.FailedPrecondition, "confidential direct-volume Pod does not reference the requested PVC")
+	}
+	root := ns.kubeletPodsRoot
+	if root == "" {
+		root = kataConfidentialKubeletPodsRoot
+	}
+	if !validKataConfidentialDirectVolumeTarget(root, podUID, targetPath) {
+		return nil, status.Error(codes.InvalidArgument, "confidential direct volume has a target path outside the Pod CSI directory")
+	}
+	metadata := map[string]string{}
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.FSGroup == nil {
+		return metadata, nil
+	}
+	groupID := *pod.Spec.SecurityContext.FSGroup
+	if groupID < 0 || uint64(groupID) > math.MaxUint32 {
+		return nil, status.Error(codes.InvalidArgument, "confidential direct-volume Pod fsGroup is outside the guest group range")
+	}
+	metadata["fsGroup"] = strconv.FormatInt(groupID, 10)
+	if pod.Spec.SecurityContext.FSGroupChangePolicy != nil {
+		switch *pod.Spec.SecurityContext.FSGroupChangePolicy {
+		case corev1.FSGroupChangeAlways, corev1.FSGroupChangeOnRootMismatch:
+			metadata["fsGroupChangePolicy"] = string(*pod.Spec.SecurityContext.FSGroupChangePolicy)
+		default:
+			return nil, status.Error(codes.InvalidArgument, "confidential direct-volume Pod has an invalid fsGroupChangePolicy")
+		}
+	}
+	return metadata, nil
+}
+
+func validKataConfidentialDirectVolumeTarget(kubeletPodsRoot, podUID, targetPath string) bool {
+	if !cleanAbsolutePath(kubeletPodsRoot) || !cleanAbsolutePath(targetPath) {
+		return false
+	}
+	relative, err := filepath.Rel(kubeletPodsRoot, targetPath)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	return len(parts) == 5 &&
+		parts[0] == podUID &&
+		parts[1] == "volumes" &&
+		parts[2] == "kubernetes.io~csi" &&
+		parts[3] != "" && parts[3] != "." && parts[3] != ".." &&
+		parts[4] == "mount"
+}
+
 func (ns *NodeServer) nodeStageKataConfidentialDirectVolume(ctx context.Context, req *csi.NodeStageVolumeRequest, volume *longhornclient.Volume) (*csi.NodeStageVolumeResponse, error) {
 	if len(req.GetSecrets()) != 0 {
 		return nil, status.Error(codes.InvalidArgument, "confidential direct volumes reject CSI node secrets")
@@ -606,6 +744,10 @@ func (ns *NodeServer) nodePublishKataConfidentialDirectVolume(ctx context.Contex
 	if err != nil {
 		return nil, err
 	}
+	mountMetadata, err := ns.kataConfidentialPodMountMetadata(ctx, req.GetVolumeContext(), req.GetTargetPath())
+	if err != nil {
+		return nil, err
+	}
 	// Kubelet can call Publish without a fresh Stage after plugin restart. Stage
 	// is metadata-only for this mode, so repairing the lifecycle record here is
 	// safe and does not touch the raw device.
@@ -616,6 +758,7 @@ func (ns *NodeServer) nodePublishKataConfidentialDirectVolume(ctx context.Contex
 		VolumeType: "directvol",
 		Device:     devicePath,
 		FsType:     kataConfidentialStorageFSType,
+		Metadata:   mountMetadata,
 		ConfidentialStorage: &kataConfidentialStorageContract{
 			Profile:  kataConfidentialStorageProfile,
 			VolumeID: identity.VolumeID,
@@ -623,7 +766,7 @@ func (ns *NodeServer) nodePublishKataConfidentialDirectVolume(ctx context.Contex
 		},
 	}
 	if err := ns.directVolumes.Publish(ctx, req.GetVolumeId(), req.GetTargetPath(), mountInfo); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to register confidential direct volume with Kata: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to publish confidential direct volume: %v", err)
 	}
 	return &csi.NodePublishVolumeResponse{}, nil
 }

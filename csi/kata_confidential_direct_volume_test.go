@@ -21,6 +21,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	longhornclient "github.com/longhorn/longhorn-manager/client"
 	longhorn "github.com/longhorn/longhorn-manager/k8s/pkg/apis/longhorn/v1beta2"
@@ -29,6 +30,8 @@ import (
 const (
 	testKataConfidentialVolumeID = "be31063a-8ec8-46d5-aa17-75cda1729370"
 	testKataConfidentialKeyURI   = "kbs:///tenant/storage/key"
+	testKataConfidentialPodUID   = "7fd5ae3d-01aa-4c7a-9d4e-a683f648851d"
+	testKataConfidentialNodeID   = "test-node"
 )
 
 type fakeKataDirectVolumeRuntime struct {
@@ -96,11 +99,39 @@ func testKataConfidentialPVC() *corev1.PersistentVolumeClaim {
 	}
 }
 
+func testKataConfidentialPod() *corev1.Pod {
+	fsGroup := int64(1000)
+	fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox",
+			Namespace: "sandbox",
+			UID:       types.UID(testKataConfidentialPodUID),
+		},
+		Spec: corev1.PodSpec{
+			NodeName: testKataConfidentialNodeID,
+			SecurityContext: &corev1.PodSecurityContext{
+				FSGroup:             &fsGroup,
+				FSGroupChangePolicy: &fsGroupChangePolicy,
+			},
+			Volumes: []corev1.Volume{{
+				Name: "workspace",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "workspace"},
+				},
+			}},
+		},
+	}
+}
+
 func testKataConfidentialVolumeContext() map[string]string {
 	return map[string]string{
 		kataConfidentialDirectVolumeParameter: "true",
 		csiPVCNameKey:                         "workspace",
 		csiPVCNamespaceKey:                    "sandbox",
+		csiPodNameKey:                         "sandbox",
+		csiPodNamespaceKey:                    "sandbox",
+		csiPodUIDKey:                          testKataConfidentialPodUID,
 	}
 }
 
@@ -118,10 +149,13 @@ func TestKataConfidentialDirectVolumeLifecycle(t *testing.T) {
 		stats: []byte(`{"usage":[{"available":8,"total":10,"used":2,"unit":1},{"available":80,"total":100,"used":20,"unit":2}],"volume_condition":{"abnormal":false,"message":""}}`),
 	}
 	manager := newTestKataConfidentialManager(t, runtime)
+	kubeletPodsRoot := t.TempDir()
 	ns := &NodeServer{
-		directVolumes: manager,
-		kubeClient:    fake.NewSimpleClientset(testKataConfidentialPVC()),
-		log:           logrus.New().WithField("test", "kata-confidential-direct-volume"),
+		directVolumes:   manager,
+		kubeClient:      fake.NewSimpleClientset(testKataConfidentialPVC(), testKataConfidentialPod()),
+		kubeletPodsRoot: kubeletPodsRoot,
+		nodeID:          testKataConfidentialNodeID,
+		log:             logrus.New().WithField("test", "kata-confidential-direct-volume"),
 	}
 	volume := testKataConfidentialDirectVolume()
 	capability := testKataConfidentialDirectVolumeCapability()
@@ -143,7 +177,7 @@ func TestKataConfidentialDirectVolumeLifecycle(t *testing.T) {
 		t.Fatalf("expected staged volume to be managed, managed=%v err=%v", managed, err)
 	}
 
-	targetPath := "/var/lib/kubelet/pods/pod-id/volumes/kubernetes.io~csi/workspace/mount"
+	targetPath := filepath.Join(kubeletPodsRoot, testKataConfidentialPodUID, "volumes", "kubernetes.io~csi", "pvc-id", "mount")
 	publishRequest := &csi.NodePublishVolumeRequest{
 		VolumeId:          volume.Name,
 		StagingTargetPath: stageRequest.StagingTargetPath,
@@ -165,6 +199,15 @@ func TestKataConfidentialDirectVolumeLifecycle(t *testing.T) {
 	}
 	if runtime.adds[0].VolumeType != "directvol" || runtime.adds[0].FsType != kataConfidentialStorageFSType || runtime.adds[0].Device != volume.Controllers[0].Endpoint {
 		t.Fatalf("unexpected mount info: %#v", runtime.adds[0])
+	}
+	if !reflect.DeepEqual(runtime.adds[0].Metadata, map[string]string{"fsGroup": "1000", "fsGroupChangePolicy": "OnRootMismatch"}) {
+		t.Fatalf("unexpected guest filesystem group metadata: %#v", runtime.adds[0].Metadata)
+	}
+	if info, err := os.Lstat(targetPath); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("expected empty host target directory, info=%#v err=%v", info, err)
+	}
+	if entries, err := os.ReadDir(targetPath); err != nil || len(entries) != 0 {
+		t.Fatalf("expected empty host target directory, entries=%#v err=%v", entries, err)
 	}
 
 	stateData, err := os.ReadFile(manager.statePath(volume.Name))
@@ -228,6 +271,9 @@ func TestKataConfidentialDirectVolumeLifecycle(t *testing.T) {
 	if len(runtime.removes) != 1 {
 		t.Fatalf("expected one Kata removal and an idempotent no-op, got %#v", runtime.removes)
 	}
+	if _, err := os.Lstat(targetPath); !os.IsNotExist(err) {
+		t.Fatalf("expected target cleanup, got %v", err)
+	}
 	if _, err := ns.NodeUnstageVolume(ctx, &csi.NodeUnstageVolumeRequest{VolumeId: volume.Name, StagingTargetPath: stageRequest.StagingTargetPath}); err != nil {
 		t.Fatal(err)
 	}
@@ -245,14 +291,18 @@ func TestKataConfidentialDirectVolumeUnstageCleansLingeringRegistration(t *testi
 		t.Fatal(err)
 	}
 	info := kataConfidentialDirectVolumeMountInfo{VolumeType: "directvol", Device: "/dev/longhorn/volume", FsType: kataConfidentialStorageFSType}
-	if err := manager.Publish(ctx, "volume", "/target", info); err != nil {
+	targetPath := filepath.Join(t.TempDir(), "target")
+	if err := manager.Publish(ctx, "volume", targetPath, info); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.Unstage(ctx, "volume"); err != nil {
 		t.Fatal(err)
 	}
-	if len(runtime.removes) != 1 || runtime.removes[0] != "/target" {
+	if len(runtime.removes) != 1 || runtime.removes[0] != targetPath {
 		t.Fatalf("unexpected cleanup calls: %#v", runtime.removes)
+	}
+	if _, err := os.Lstat(targetPath); !os.IsNotExist(err) {
+		t.Fatalf("expected lingering target cleanup, got %v", err)
 	}
 }
 
@@ -338,6 +388,102 @@ func TestKataConfidentialStorageIdentityValidation(t *testing.T) {
 	}
 }
 
+func TestKataConfidentialPodMountMetadataValidation(t *testing.T) {
+	kubeletPodsRoot := t.TempDir()
+	targetPath := filepath.Join(kubeletPodsRoot, testKataConfidentialPodUID, "volumes", "kubernetes.io~csi", "pvc-id", "mount")
+	baseContext := testKataConfidentialVolumeContext()
+
+	for _, test := range []struct {
+		name          string
+		mutateContext func(map[string]string)
+		mutatePod     func(*corev1.Pod)
+		targetPath    string
+	}{
+		{name: "valid"},
+		{name: "missing Pod metadata", mutateContext: func(context map[string]string) { delete(context, csiPodUIDKey) }},
+		{name: "Pod and PVC namespace differ", mutateContext: func(context map[string]string) { context[csiPodNamespaceKey] = "other" }},
+		{name: "Pod UID changed", mutateContext: func(context map[string]string) { context[csiPodUIDKey] = "different" }},
+		{name: "wrong node", mutatePod: func(pod *corev1.Pod) { pod.Spec.NodeName = "other-node" }},
+		{name: "PVC not referenced", mutatePod: func(pod *corev1.Pod) { pod.Spec.Volumes = nil }},
+		{name: "target outside Pod directory", targetPath: filepath.Join(kubeletPodsRoot, "other", "volumes", "kubernetes.io~csi", "pvc-id", "mount")},
+		{name: "negative fsGroup", mutatePod: func(pod *corev1.Pod) { group := int64(-1); pod.Spec.SecurityContext.FSGroup = &group }},
+		{name: "fsGroup above guest range", mutatePod: func(pod *corev1.Pod) { group := int64(1) << 32; pod.Spec.SecurityContext.FSGroup = &group }},
+		{name: "invalid fsGroup change policy", mutatePod: func(pod *corev1.Pod) {
+			policy := corev1.PodFSGroupChangePolicy("Sometimes")
+			pod.Spec.SecurityContext.FSGroupChangePolicy = &policy
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			volumeContext := make(map[string]string, len(baseContext))
+			for key, value := range baseContext {
+				volumeContext[key] = value
+			}
+			if test.mutateContext != nil {
+				test.mutateContext(volumeContext)
+			}
+			pod := testKataConfidentialPod()
+			if test.mutatePod != nil {
+				test.mutatePod(pod)
+			}
+			requestedTarget := targetPath
+			if test.targetPath != "" {
+				requestedTarget = test.targetPath
+			}
+			ns := &NodeServer{
+				kubeClient:      fake.NewSimpleClientset(pod),
+				kubeletPodsRoot: kubeletPodsRoot,
+				nodeID:          testKataConfidentialNodeID,
+			}
+			metadata, err := ns.kataConfidentialPodMountMetadata(context.Background(), volumeContext, requestedTarget)
+			if test.name == "valid" {
+				if err != nil || !reflect.DeepEqual(metadata, map[string]string{"fsGroup": "1000", "fsGroupChangePolicy": "OnRootMismatch"}) {
+					t.Fatalf("unexpected valid metadata: %#v err=%v", metadata, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected validation failure, got %#v", metadata)
+			}
+		})
+	}
+
+	pod := testKataConfidentialPod()
+	pod.Spec.SecurityContext = nil
+	ns := &NodeServer{kubeClient: fake.NewSimpleClientset(pod), kubeletPodsRoot: kubeletPodsRoot, nodeID: testKataConfidentialNodeID}
+	metadata, err := ns.kataConfidentialPodMountMetadata(context.Background(), baseContext, targetPath)
+	if err != nil || len(metadata) != 0 {
+		t.Fatalf("Pod without fsGroup should produce no guest group metadata: %#v err=%v", metadata, err)
+	}
+}
+
+func TestKataConfidentialDirectVolumeTargetFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	fileTarget := filepath.Join(root, "file")
+	if err := os.WriteFile(fileTarget, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureKataConfidentialDirectVolumeTarget(fileTarget); err == nil {
+		t.Fatal("expected regular target file rejection")
+	}
+	symlinkTarget := filepath.Join(root, "symlink")
+	if err := os.Symlink(root, symlinkTarget); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureKataConfidentialDirectVolumeTarget(symlinkTarget); err == nil {
+		t.Fatal("expected target symlink rejection")
+	}
+	nonEmptyTarget := filepath.Join(root, "non-empty")
+	if err := os.Mkdir(nonEmptyTarget, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmptyTarget, "data"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeKataConfidentialDirectVolumeTarget(nonEmptyTarget); err == nil {
+		t.Fatal("expected non-empty target cleanup rejection")
+	}
+}
+
 func TestKataConfidentialDirectVolumeMarkerFailsClosed(t *testing.T) {
 	requested, err := kataConfidentialDirectVolumeRequested(nil)
 	if err != nil || requested {
@@ -377,10 +523,11 @@ func TestKataConfidentialDirectVolumeStatsValidation(t *testing.T) {
 				t.Fatal(err)
 			}
 			info := kataConfidentialDirectVolumeMountInfo{VolumeType: "directvol", Device: "/dev/longhorn/volume", FsType: kataConfidentialStorageFSType}
-			if err := manager.Publish(context.Background(), "volume", "/target", info); err != nil {
+			targetPath := filepath.Join(t.TempDir(), "target")
+			if err := manager.Publish(context.Background(), "volume", targetPath, info); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := manager.Stats(context.Background(), "volume", "/target"); err == nil {
+			if _, err := manager.Stats(context.Background(), "volume", targetPath); err == nil {
 				t.Fatal("expected invalid stats error")
 			}
 		})
@@ -390,10 +537,11 @@ func TestKataConfidentialDirectVolumeStatsValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	info := kataConfidentialDirectVolumeMountInfo{VolumeType: "directvol", Device: "/dev/longhorn/volume", FsType: kataConfidentialStorageFSType}
-	if err := manager.Publish(context.Background(), "volume", "/target", info); err == nil {
+	targetPath := filepath.Join(t.TempDir(), "target")
+	if err := manager.Publish(context.Background(), "volume", targetPath, info); err == nil {
 		t.Fatal("expected runtime add error")
 	}
-	if _, err := manager.Stats(context.Background(), "volume", "/target"); err == nil {
+	if _, err := manager.Stats(context.Background(), "volume", targetPath); err == nil {
 		t.Fatal("expected runtime error")
 	}
 }
@@ -410,6 +558,7 @@ func TestHostKataCtlUsesHostRootAndPreservesBoundedDiagnostics(t *testing.T) {
 		VolumeType: "directvol",
 		Device:     "/dev/longhorn/volume",
 		FsType:     kataConfidentialStorageFSType,
+		Metadata:   map[string]string{"fsGroup": "1000", "fsGroupChangePolicy": "OnRootMismatch"},
 		ConfidentialStorage: &kataConfidentialStorageContract{
 			Profile:  kataConfidentialStorageProfile,
 			VolumeID: "volume",
@@ -422,7 +571,7 @@ func TestHostKataCtlUsesHostRootAndPreservesBoundedDiagnostics(t *testing.T) {
 	if command != nsMounterPath || len(args) != 6 || args[0] != "--host-root" || args[1] != kataCtlPath || args[2] != "direct-volume" || args[3] != "add" || args[4] != "/target" {
 		t.Fatalf("unexpected host Kata command: %q %#v", command, args)
 	}
-	wantMountInfo := `{"volume-type":"directvol","device":"/dev/longhorn/volume","fstype":"confidential-storage","confidential-storage":{"profile":"luks2-integrity-ext4","volume-id":"volume","key-uri":"kbs:///tenant/storage/key"}}`
+	wantMountInfo := `{"volume-type":"directvol","device":"/dev/longhorn/volume","fstype":"confidential-storage","metadata":{"fsGroup":"1000","fsGroupChangePolicy":"OnRootMismatch"},"confidential-storage":{"profile":"luks2-integrity-ext4","volume-id":"volume","key-uri":"kbs:///tenant/storage/key"}}`
 	if args[5] != wantMountInfo {
 		t.Fatalf("unexpected typed Kata mount contract: %s", args[5])
 	}
